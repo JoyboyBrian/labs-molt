@@ -58,7 +58,6 @@ _TOOL_SCHEMAS = [tool.schema for tool in _TOOLS.values()]
 
 _MAX_TURNS = int(os.environ.get("MAX_AGENT_TURNS", "5"))
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE)
-_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 # Default candidates cover the vLLM rename: <=0.23 ships Qwen3XMLToolParser,
 # >=0.24 replaces it with the Rust-backed Qwen3EngineToolParser (same interface).
 _PARSER_CLS_PATHS = [
@@ -101,17 +100,24 @@ def _extract_tool_call(text: str) -> dict | None:
 # so a single grader works across either prompt distribution — `prepare_geo3k.py
 # --answer-format` decides which wrapper the model is asked to emit; this catches
 # whichever it actually produces.
+def _final_answer(text: str) -> str:
+    r"""The answer the model committed to, or ``""``.
+
+    ONE extraction shared by the turn loop's stop condition and the grader, so the two can
+    never disagree about whether an answer exists. Balanced ``\boxed``/``\fbox`` parsing
+    handles nested braces (``\boxed{\frac{1}{2}}``), which a flat regex truncates.
+    """
+    answers = _ANSWER_RE.findall(text)
+    if answers:
+        return answers[-1].strip()
+    boxed = _GRADER._last_braced_command(text, r"\boxed") or _GRADER._last_braced_command(text, r"\fbox")
+    return boxed.strip() if boxed else ""
+
+
 def _grade_answer(text: str, label) -> tuple[float, str]:
     if not label:
         return 0.0, ""
-    answers = _ANSWER_RE.findall(text)
-    if answers:
-        answer = answers[-1].strip()
-    else:
-        # Balanced \boxed/\fbox extraction — handles nested braces (\boxed{\frac{1}{2}})
-        # that the flat _BOXED_RE truncates. Dormant on the omni3 <answer> path.
-        boxed = _GRADER._last_braced_command(text, r"\boxed") or _GRADER._last_braced_command(text, r"\fbox")
-        answer = boxed.strip() if boxed else ""
+    answer = _final_answer(text)
     if not answer:
         return 0.0, ""
     try:
@@ -123,11 +129,13 @@ def _grade_answer(text: str, label) -> tuple[float, str]:
 
 class Geo3kAgent(ChatAgent):
     async def run(self, ctx: ChatContext) -> Result:
-        # Retries ride out a transient loopback stall (e.g. a weight broadcast briefly freezes the
-        # server's event loop). Safe: the server serializes turns per session (a lock) and replays
-        # an already-recorded turn idempotently (same messages -> cached reply, no second sample),
-        # so a retry can't double-count. Generous timeout so slow cold-start generations don't fail.
-        client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key, max_retries=3, timeout=3600)
+        # max_retries=0 — the transport BEHIND this server already retries (RouterGenerateClient
+        # ._post), so retrying here multiplies the two budgets: a turn whose generation outlives the
+        # transport's read timeout gets resent 3x by _post and then 3x again by the SDK, turning one
+        # slow turn into hours. A client-side retry is still SAFE (the server locks per session and
+        # replays an already-recorded turn idempotently) — it just isn't ours to spend twice.
+        # Generous timeout so slow cold-start generations don't fail.
+        client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key, max_retries=0, timeout=3600)
         # The dataset row, ready to send: images are already inlined as image_url items.
         # Tools come from the dataset's tools column when present (the same schemas the
         # step-runner geo3k.py renders), else this agent's local ones.
@@ -154,7 +162,7 @@ class Geo3kAgent(ChatAgent):
             # even if it co-emits a tool_call, or when it stops calling tools —
             # avoids post-answer verification loops that inflate length/turns
             # without improving reward (a length-hacking failure mode).
-            if _ANSWER_RE.search(action) or _BOXED_RE.search(action) or tool_call is None:
+            if _final_answer(action) or tool_call is None:
                 break
 
             tool_call_count += 1
