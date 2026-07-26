@@ -56,10 +56,9 @@ export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 # torch dispatcher drifts the recompute and raises CheckpointError. Memory tiers
 # on one 8-GPU actor node: CP=1 fits ~16K, 32K needs CP8.
 export MAX_LENGTH="${MAX_LENGTH:-32000}"
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
-export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-64}"  # = ROLLOUT_BATCH_SIZE: dispatch all prompts in one vLLM batch
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
+export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"  # = ROLLOUT_BATCH_SIZE: dispatch all prompts in one vLLM batch
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export NUM_EPISODES="${NUM_EPISODES:-5}"   # >=5 so RL doesn't cap at ~33 steps
 export ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
@@ -69,15 +68,16 @@ export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 
 # --- Optimizer / algo (Adam; aligned with the qwen3.6 recipe) ---------------
 export OPTIM="${OPTIM:-adam}"
-export LR="${LR:-1e-5}"
+export LR="${LR:-2e-6}"
 
 # --- Eval / checkpoint ------------------------------------------------------
 export SAVE_STEPS="${SAVE_STEPS:-2}"
 export EVAL_STEPS="${EVAL_STEPS:-10}"
 export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
-# Baseline eval at step 0 (pre-RL model) on fresh runs, so pass1 gains are
-# attributable. No-op on resume (global_step starts > 0). Set EVAL_AT_START=0 to skip.
-export EVAL_AT_START="${EVAL_AT_START:-1}"
+# Off by default: a step-0 baseline eval holds the rollout engines for the whole
+# eval set before the first training step, which reads as a stalled run. Set
+# EVAL_AT_START=1 when the pre-RL pass1 number is worth that wait.
+export EVAL_AT_START="${EVAL_AT_START:-0}"
 export ENABLE_DYNAMIC_FILTERING="${ENABLE_DYNAMIC_FILTERING:-0}"
 
 # --- Dataset: geo3k in <answer>...</answer> format --------------------------
@@ -163,15 +163,10 @@ fi
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
-# MAX_LENGTH is the shared total-context budget (prompt + generation), used as
-# both data.max_len and vLLM max_model_len; the 64k default gives headroom for
-# vision tokens + multi-turn history. Longest prompt must satisfy
-# prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH.
+# MAX_LENGTH is the shared total-context budget (prompt + generation), used as both
+# data.max_len and vLLM max_model_len. It is the only generation bound: a turn may
+# use whatever context is left, and multi-turn agents accumulate history within it.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS: per-turn generation cap. Unset = unlimited (bounded by
-# MAX_LENGTH); multi-turn agents issue many turns, so this is a per-call max,
-# not a context budget.
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts dispatched per make_experience call.
 # Keep rollout_batch_size * n_samples >= train_batch_size or the policy_train
@@ -225,7 +220,7 @@ FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
 # Algo — defaults tuned for geo3k VLM math multi-turn.
 KL_COEF="${KL_COEF:-0.0}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0}"   # RL: no load-balancing aux (don't perturb the policy grad)
-LR="${LR:-1e-5}"
+LR="${LR:-2e-6}"
 DUAL_CLIP="${DUAL_CLIP:-10.0}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 ADAM_BETA1="${ADAM_BETA1:-0.9}"
@@ -381,7 +376,6 @@ RL_ARGS=(
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.num_runners "${NUM_RUNNERS:-8}"

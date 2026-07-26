@@ -1017,12 +1017,6 @@ if __name__ == "__main__":
                 "pin already includes it)."
             ) from exc
 
-    if args.fsdp.cp_size > 1 and args.fsdp.packing_samples:
-        raise ValueError(
-            "RL with --fsdp.cp_size > 1 is incompatible with --fsdp.packing_samples; "
-            "the CP path is wired for padded batches and packed RL still needs CP-aware varlen boundaries."
-        )
-
     if args.fsdp.packing_samples:
         assert args.vllm.num_engines > 0, "Only support `--fsdp.packing_samples` with vLLM."
         # tilelang joins te/fa2: DSA (glm_moe_dsa) is THD-native and *requires* packing.

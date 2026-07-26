@@ -46,7 +46,6 @@ export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-1}"
 export CP_SIZE="${CP_SIZE:-1}"
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 # FA2 is required for HF packing (cu_seq_lens path); init-time validation
 # in Actor.from_pretrained refuses other attn impls when packing is on.
 export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-flash_attention_2}"
@@ -102,21 +101,10 @@ fi
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
-# Sequence + batch shape: 16 prompts × 8 samples = 128 sequences/train batch.
-# MAX_LENGTH is the SHARED total-context budget (prompt + generation), used
-# both as data.max_len and vLLM's max_model_len. Visual prompts expand to
-# thousands of vision tokens once the chat template applies the `<image>`
-# placeholder, and multi-turn agents accumulate history — default to 64k
-# headroom. MAX_NEW_TOKENS is the per-request generation cap within that
-# budget; longest prompt must satisfy `prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH`.
+# MAX_LENGTH is the shared total-context budget (prompt + generation), used as both
+# data.max_len and vLLM max_model_len. It is the only generation bound: a turn may
+# use whatever context is left, and multi-turn agents accumulate history within it.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS is the per-turn generation cap. Defaults to 8192 — enough for
-# CoT + answer on math reasoning tasks while keeping rollout
-# wall-time and activation memory bounded. Multiturn agents can issue many
-# turns within MAX_LENGTH, so this isn't a context budget — it's a per-call
-# max. Set to MAX_LENGTH explicitly if you really want each turn to consume
-# the full remaining context.
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts the trainer dispatches per
 # `make_experience` call. The trainer's policy_train loop drops trailing
@@ -162,7 +150,7 @@ FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
 # Algo
 KL_COEF="${KL_COEF:-0.001}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0.000}"
-LR="${LR:-1e-6}"
+LR="${LR:-2e-6}"
 DUAL_CLIP="${DUAL_CLIP:-10.0}"
 DISABLE_FINAL_SAVE="${DISABLE_FINAL_SAVE:-0}"
 
@@ -280,7 +268,6 @@ RL_ARGS=(
   --data.image_key "${IMAGE_KEY:-images}"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.micro_batch_size 1

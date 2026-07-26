@@ -57,8 +57,8 @@ export MAX_LENGTH="${MAX_LENGTH:-32768}"
 # offload (FSDP_CPU_OFFLOAD) hits Qwen3.5-MoE upstream device-mismatch bugs.
 export OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-0}"
 export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-0}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
 # 0.85, not vLLM's 0.95 default: with the unlimited per-turn token budget this
@@ -84,7 +84,6 @@ export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
 # Per-turn generation cap. With multi-turn rollouts (max_turns × max_new_tokens
 # accumulates across turns within MAX_LENGTH), keep this large enough that turn-1
 # rarely truncates — observed truncated_rate ≈ 60% with 2048, ≈ 20% with 4096.
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 
 # Stable SAVE_ROOT (no $SLURM_JOB_ID) so resubmits can resume via LOAD_ENABLE=1.
 export SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/async-visual-rl-qwen3-6/run}"
@@ -157,19 +156,10 @@ fi
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
-# Sequence + batch shape: 16 prompts × 8 samples = 128 sequences/train batch.
-# MAX_LENGTH is the SHARED total-context budget (prompt + generation), used
-# both as data.max_len and vLLM's max_model_len. Visual prompts expand to
-# thousands of vision tokens once the chat template applies the `<image>`
-# placeholder, and multi-turn agents accumulate history — default to 64k
-# headroom. MAX_NEW_TOKENS is the per-request generation cap within that
-# budget; longest prompt must satisfy `prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH`.
+# MAX_LENGTH is the shared total-context budget (prompt + generation), used as both
+# data.max_len and vLLM max_model_len. It is the only generation bound: a turn may
+# use whatever context is left, and multi-turn agents accumulate history within it.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS is the per-turn generation cap. Defaults to 4096 — enough for
-# CoT + answer on visual reasoning tasks while keeping rollout wall-time and
-# activation memory bounded. Multi-turn agents can issue many turns within
-# MAX_LENGTH, so this isn't a context budget — it's a per-call max.
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts the trainer dispatches per
 # `make_experience` call. The trainer's policy_train loop drops trailing
@@ -192,9 +182,10 @@ MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 # Pure async + partial rollout: queue depth >= 2 so train overlaps next rollout.
 ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
 MAX_IMAGES_PER_PROMPT="${MAX_IMAGES_PER_PROMPT:-1}"
-# vLLM rollout side: dedicated full node, TP+EP hybrid for MoE.
-VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-1}"
-VLLM_TP_SIZE="${VLLM_TP_SIZE:-8}"
+# vLLM rollout side: dedicated full node, TP+EP hybrid for MoE. TP2 x 4 engines
+# beats TP8 x 1 here — more concurrent sequences, and a 35B MoE fits at TP2.
+VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-4}"
+VLLM_TP_SIZE="${VLLM_TP_SIZE:-2}"
 # Rollout data parallelism. vLLM has no standalone EP size (EP = TP * DP), so set
 # DP>1 to decouple EP from TP (e.g. TP4 + DP2 -> EP8 on one 8-GPU node). DP>1
 # requires the ray executor. Default 1 = unchanged.
@@ -378,7 +369,6 @@ RL_ARGS=(
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.micro_batch_size 1
