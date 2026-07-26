@@ -89,23 +89,23 @@ def compute_approx_kl(
 
 
 def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
-    if temperature != 1.0:
-        # Non-inplace: callers may keep the tensor in `output["logits"]` for
-        # downstream consumers (allgather/entropy paths share the buffer).
-        logits = logits / temperature
-
     batch_dim = logits.shape[:-1]
     last_dim = logits.shape[-1]
     flat_logits = logits.reshape(-1, last_dim)
     flat_labels = labels.reshape(-1)
 
+    # Both paths below scale at fp32, never on a bf16 input: rounding the quotient back to bf16
+    # costs ~1 ULP per logit on top of the logits' own quantization. Non-inplace — callers keep
+    # the tensor in `output["logits"]` for the entropy path.
+    #
     # Fast path: fused triton CE kernel only supports fp32/fp64.
     # https://github.com/OpenRLHF/OpenRLHF/pull/718#issuecomment-2641081881
     if logits.dtype in [torch.float32, torch.float64]:
         try:
             from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
-            output = cross_entropy_loss(flat_logits, flat_labels)
+            scaled = flat_logits / temperature if temperature != 1.0 else flat_logits
+            output = cross_entropy_loss(scaled, flat_labels)
             return (-output[0]).view(*batch_dim)
         except ImportError:
             pass
@@ -121,6 +121,8 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     for s_idx in range(0, n_rows, chunk_size):
         end_idx = min(s_idx + chunk_size, n_rows)
         chunk = flat_logits[s_idx:end_idx].float()
+        if temperature != 1.0:
+            chunk = chunk / temperature
         gathered = chunk.gather(dim=-1, index=flat_labels[s_idx:end_idx].unsqueeze(-1)).squeeze(-1)
         lse = torch.logsumexp(chunk, dim=-1)
         out[s_idx:end_idx] = gathered - lse
@@ -138,8 +140,7 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
 @torch.compile
 def compute_entropy(logits: torch.Tensor):
     pd = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
-    return entropy
+    return torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
 
 
 def split_moe_aux_loss(output, enabled: bool):
@@ -230,6 +231,6 @@ def attach_nemo_moe_aux_loss(output, model: nn.Module):
         output["aux_loss"] = aux_loss
         output["_molt_aux_loss_in_backward"] = True
     else:
-        setattr(output, "aux_loss", aux_loss)
-        setattr(output, "_molt_aux_loss_in_backward", True)
+        output.aux_loss = aux_loss
+        output._molt_aux_loss_in_backward = True
     return output
