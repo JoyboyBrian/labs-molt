@@ -211,16 +211,17 @@ VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
 # Rollout-only speedups, isolation-tested on qwen3.6:
-#  * ENABLE_PREFIX_CACHING=1 (default ON) is logprob-clean alone AND with routing
-#    replay, and slashes multi-turn re-prefill (sibling rollouts share the prompt
-#    prefix within a step).
+#  * ENABLE_PREFIX_CACHING=1 slashes multi-turn re-prefill (sibling rollouts share the
+#    prompt prefix within a step), but OFF by default: cached blocks outlive a weight
+#    update, so a rollout can be served KV computed under the previous policy. It brings
+#    the vllm_kl drift forward by ~10 steps and multiplies it 2-3x (4.5e-3 vs 2.8e-4 at
+#    step 16). It is not the whole story — the drift still appears without it, later and
+#    smaller — so leaving it off buys headroom, not a fix.
 #  * MTP (draft auto-detected from the checkpoint's MTP head; ~5x faster generation)
 #    is clean ONLY standalone — it corrupts rollout logprobs with ROUTING_REPLAY
 #    (capture misaligns) and with prefix caching (KV rollback vs cached blocks).
-#    The trainer hard-refuses both combinations, so enabling MTP requires
-#    ENABLE_PREFIX_CACHING=0.
 MTP_NUM_SPECULATIVE_TOKENS="${MTP_NUM_SPECULATIVE_TOKENS:-0}"
-ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 # AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.
 ACTOR_NODES="${ACTOR_NODES:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"

@@ -715,17 +715,23 @@ class PolicyTrainer:
             _flush()
 
         if check_weight_update:
-            reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
-            unchanged = sorted({name for names, _ in reports for name in names})
-            total = max((count for _, count in reports), default=0)
-            # Read this against actor_grad_norm: a step whose gradient was zero (uniform
-            # group reward) broadcasts identical weights, so 0 changed is correct there.
-            # Frozen params (vision tower, MoE router) never move either. It is only a
-            # fault when nothing moved after a step that did update the actor.
-            logger.info(
-                f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
-                f"{len(unchanged)} unchanged (frozen + no-op steps included), sample: {unchanged[:5]}"
-            )
+            # Which of the engine's weights did this broadcast never land on? The engines are
+            # replicas, so one answers for all.
+            unaddressed = ray.get(self.vllm_engines[0].weight_update_missing.remote())
+            if unaddressed is None:
+                logger.warning(
+                    "[check_weight_update] cannot verify: vLLM reports assigned weights under names "
+                    "that do not match its own parameters"
+                )
+            elif unaddressed:
+                # A tied lm_head is in here by design (it reaches vLLM via embed_tokens);
+                # anything else kept its old value and makes the rollout stale.
+                logger.warning(
+                    f"[check_weight_update] {len(unaddressed)} vLLM weights the broadcast never "
+                    f"landed on: {unaddressed[:10]}"
+                )
+            else:
+                logger.info("[check_weight_update] the broadcast landed on every vLLM weight")
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
