@@ -35,13 +35,17 @@ else
 fi
 
 ENV_FLAGS=()
+# Pass env vars by name only and keep xtrace off while expanding them,
+# so tokens never hit the trace, shell history, or `ps` output.
+{ set +x; } 2>/dev/null
 for ENV_NAME in CUDA_VISIBLE_DEVICES FLASHINFER_WORKSPACE_BASE FLASHINFER_WORKSPACE_DIR HF_HOME HF_TOKEN HUGGING_FACE_HUB_TOKEN PYTORCH_CUDA_ALLOC_CONF; do
 	if [[ -n "${!ENV_NAME:-}" ]]; then
-		ENV_FLAGS+=(-e "$ENV_NAME=${!ENV_NAME}")
+		ENV_FLAGS+=(-e "$ENV_NAME")
 	fi
 done
+set -x
 
-docker run --runtime=nvidia --gpus "$DOCKER_GPUS" "${TTY_FLAGS[@]}" --rm --shm-size="$DOCKER_SHM_SIZE" --cap-add=SYS_ADMIN \
+docker run --gpus "$DOCKER_GPUS" "${TTY_FLAGS[@]}" --rm --shm-size="$DOCKER_SHM_SIZE" --cap-add=SYS_ADMIN \
 	"${ENV_FLAGS[@]}" \
 	-v $PROJECT_PATH:/molt -v  $HOME/.cache:/root/.cache -v  $HOME/.bash_history2:/root/.bash_history \
 	$IMAGE_NAME bash -lc "cd /molt && $CONTAINER_CMD"
